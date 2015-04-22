@@ -114,6 +114,8 @@ class Recommender(object):
             corpus = pd.concat([self.questions_df.title+" "+self.questions_df.question,
                                 self.answers_df.answer,
                                 self.comments_df.comment])
+            # strip the HTML - this will throw warnings if there are URLs in the corpus, but oh well
+            corput = [BeautifulSoup(entry).get_text() for entry in corpus]
             site_corpus = [self.post_to_words(post) for post in corpus]
             
             # create the BoW dictionary
@@ -607,6 +609,12 @@ class Recommender(object):
 
             with gzip.GzipFile('data/'+self.site_name+'/dataframes.gzpkl', 'wb') as f:
                 pkl.dump(dfs, f)
+
+            with gzip.GzipFile('data/'+self.site_name+'/userdf.gzpkl', 'wb') as f:
+                pkl.dump(self.users_df, f)
+
+            with gzip.GzipFile('data/'+self.site_name+'/qdf.gzpkl', 'wb') as f:
+                pkl.dump(self.questions_df, f)
             
         return   
 
@@ -650,3 +658,16 @@ class Recommender(object):
             print "-"*83
 
         return None
+
+    def similar_questions(self, title, question, N=10):
+        """
+        Returns the top N most similar questions (using LDA vectors).
+        """
+        
+        LDAvec = self.post2LDAvec(title+" "+question)
+        qvec = self.LDAvec2ndarray(LDAvec)
+        
+        similarities = pd.Series(cosine_similarity(qvec,self.questionLDA)[0], index=self.question_idx.index)
+        similarities.sort(ascending=False)
+        
+        return similarities.head(N).index
