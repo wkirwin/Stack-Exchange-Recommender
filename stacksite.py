@@ -149,7 +149,7 @@ class StackSite(object):
             self.comments_df = dfs['comments']
 
         with gzip.GzipFile('data/'+self.site_name+'/fulldf.gzpkl','rb') as f:
-            dfs = pkl.load(f)
+            self.fulldf = pkl.load(f)
 
         print "Dataframes successfully loaded."
         sys.stdout.flush()

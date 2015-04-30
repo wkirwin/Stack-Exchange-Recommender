@@ -74,7 +74,7 @@ class Recommender(object):
         self.lf_qidx = None
 
 
-    # (re)train the LDA model
+    # (re)train the recommender
     def train(self, num_topics = 100, iterations = 1000, passes = 1, df_dict = None, multicore = False, 
               cutoff = 4, compute_similarity = False, tfidf=False, train_LDA=True):
         """
@@ -589,7 +589,7 @@ class Recommender(object):
 
         return decorated_stars.head(N).index
 
-    # make recommendations for all users and store the list of recommended question_id's in self.user_df
+    # make recommendations for all uses and store the list of recommended question_id's in self.user_df
     def recommend_all(self, N = 10, method = 'LF', save = True):
         
         def rq(uid):
