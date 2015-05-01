@@ -106,6 +106,6 @@ if __name__ == "__main__":
 			ready_sites = set(f.read().splitlines())
 		ready_sites.add(site_name)
 		with open('static/ready_sites.csv', 'w') as f:
-			[f.write(site+"\n") for site in ready_sites]
+			[f.write(site.split('.')[0]+"\n") for site in ready_sites]
 
 		print "Successfully created latent-factor vectors for %s." % site_name
