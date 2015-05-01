@@ -73,12 +73,12 @@ if __name__ == "__main__":
 		item_idx = pd.Series(range(len(mids)), index=mids)
 
 		# make ALL the predictions
-		print "  ...making ALL the predictions"
-		sys.stdout.flush()
-		bigdata = sc.parallelize([(int(uid), int(mid)) for uid in uids for mid in mids])
+		# print "  ...making ALL the predictions"
+		# sys.stdout.flush()
+		# bigdata = sc.parallelize([(int(uid), int(mid)) for uid in uids for mid in mids])
 
-		predictions = zip(*model.predictAll(bigdata).map(lambda r: (user_idx.ix[str(r[0])], item_idx.ix[str(r[1])], r[2])).collect())
-		P = coo_matrix((predictions[2], (predictions[0], predictions[1]))).todense()
+		# predictions = zip(*model.predictAll(bigdata).map(lambda r: (user_idx.ix[str(r[0])], item_idx.ix[str(r[1])], r[2])).collect())
+		# P = coo_matrix((predictions[2], (predictions[0], predictions[1]))).todense()
 
 		# stop the SparkContext
 		sc.stop()
@@ -90,11 +90,22 @@ if __name__ == "__main__":
 		    pkl.dump(U, f)
 		with gzip.GzipFile("data/"+site_name+"/pfeatures.gzpkl", "wb") as f:
 		    pkl.dump(V, f)
-		with gzip.GzipFile("data/"+site_name+"/predictions.gzpkl", "wb") as f:
-			pkl.dump(P, f)
+		# with gzip.GzipFile("data/"+site_name+"/predictions.gzpkl", "wb") as f:
+		#	pkl.dump(P, f)
 		with open("data/"+site_name+"/uidx.pkl", "wb") as f:
 		    pkl.dump(user_idx, f)
 		with open("data/"+site_name+"/midx.pkl", "wb") as f:
 		    pkl.dump(item_idx, f)
+
+		# add the site to the list of ready sites
+		ready_sites = set([]);
+		if not os.path.exists('static'):
+			os.makedirs('static')
+		open('static/ready_sites.csv', 'a').close()
+		with open('static/ready_sites.csv', 'r') as f:
+			ready_sites = set(f.read().splitlines())
+		ready_sites.add(site_name)
+		with open('static/ready_sites.csv', 'w') as f:
+			[f.write(site+"\n") for site in ready_sites]
 
 		print "Successfully created latent-factor vectors for %s." % site_name

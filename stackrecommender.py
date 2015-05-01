@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import re, string
+import re
 from nltk.corpus import stopwords
 from bs4 import BeautifulSoup
 import gensim
@@ -9,6 +9,7 @@ import heapq
 import operator
 import warnings
 import sys
+import distance
 try:
     import cPickle as pkl
 except:
@@ -16,50 +17,38 @@ except:
 import gzip
 
 class Recommender(object):
+    """
+    Initialization:
+    site_name = "<site>.stackexchange.com" : name of the site
+    df_dict = StackSite(site_name).df_dict()
+    W2Vmodel = binary word2vec model (should probably preload GoogleNews-vectors-negative300.bin and pass it)
+    """
     
-    def __init__(self, site_name, df_dict = None):
+    def __init__(self, site_name, df_dict = None, W2Vmodel = None):
         # site_name : all files will be read from/saved to ./data/site_name
+        # loading the binary word2vec model is *slow*... it is much better to load it once
+        #   and pass it to different recommenders
         self.site_name = site_name
 
         # initialize the dataframes
         if df_dict is not None:
+            self.users_df = df_dict['users']
             self.questions_df = df_dict['questions']
             self.answers_df = df_dict['answers']
             self.tags_df = df_dict['tags']
-            self.users_df = df_dict['users']
-            self.comments_df = df_dict['comments']
-            self.fulldf = df_dict['fulldf']
 
-            # numerical indexing
-            self.question_idx = pd.Series(data=range(len(self.questions_df)), index=self.questions_df.index)
-            self.tags_idx = pd.Series(data=range(len(self.tags_df)), index=self.tags_df.name)
+        # I can't recommend to deleted accounts
+        self.users_df = self.users_df.drop('-999')
 
-            # convert scores to stars and compute useful statistics
-            def star(score):
-                cutoffs = np.array([-np.inf, 0, 2, 7, 17])
-                stars = int(len(np.where(cutoffs < score)[0]) - 1)
-                return stars
+        # numerical indexing
+        self.question_idx = pd.Series(data=range(len(self.questions_df)), index=self.questions_df.index)
+        self.tags_idx = pd.Series(data=range(len(self.tags_df)), index=self.tags_df.name)
 
-            self.answers_df['stars'] = self.answers_df.score.apply(star)
-
-            #    the average stars of first time answerers
-            grp_answers_df = self.answers_df.groupby('user_id')
-
-            # switched to median
-            self.avg_new_user_stars = grp_answers_df.stars.mean()[grp_answers_df.stars.count() == 1].median()
-            if np.isnan(self.avg_new_user_stars):
-                warnings.warn("Warning: no users have answered only one question. This is likely a synthetic database.\n \
-                    parameter avg_new_user_stars defaulting to 2.0")
-                self.avg_new_user_stars = 2.0
-        
         # initialize the gensim objects
-        self.dictionary = None
-        self.vectorized_corpus = None
-        self.LDAmodel = None
-        self.num_topics = 0
+        self.W2Vmodel = W2Vmodel
 
-        # LDA vector arrays
-        self.questionLDA = None # an ndarray of size (n_questions, n_topics) to hold the LDA vectors of the questions
+        # question-vector arrays
+        self.questionW2V = None # an ndarray of size (n_questions, n_topics) to hold the LDA vectors of the questions
         self.tags = None # an ndarray of size (n_questions, n_tags) to hold the boolean tag vectors for the questions
 
         # similarity matrices
@@ -68,134 +57,38 @@ class Recommender(object):
         #self.tfidf_similarity = None
 
         # latent factor vectors and indices
-        self.lf_user = None
-        self.lf_question = None
-        self.lf_uidx = None
-        self.lf_qidx = None
-
-
-    # (re)train the recommender
-    def train(self, num_topics = 100, iterations = 1000, passes = 1, df_dict = None, multicore = False, 
-              cutoff = 4, compute_similarity = False, tfidf=False, train_LDA=True):
-        """
-        Builds the corpus from the supplied DataFrames, 
-        creates a dictionary from it, and trains an LDA model
-        and creates LDA vectors for each question in the corpus.
-
-        Each user's answered questions are partitioned into 'good' (stars >= cutoff) 
-        and 'bad' (stars < cutoff), and an average LDA+tag-vector is created for
-        each class.
-        
-        Optional Parameters
-        ===================
-        num_topics : number of topics in in the LDA model
-        iterations : number of iterations for training the LDA model
-        passes : number of passes for training the LDA model
-        multicore : (optional, default False) number of workers to use for multicore training (should be = cpu_count() - 1)
-        cutoff : (optional, default 4) minimum stars for a 'good' question
-        """
-
-        #print "Training..."
-        #sys.stdout.flush()
-
-        if df_dict is not None:
-            self.questions_df = df_dict['questions']
-            self.answers_df = df_dict['answers']
-            self.tags_df = df_dict['tags']
-            self.users_df = df_dict['users']
-            self.comments_df = df_dict['comments']
-            self.fulldf = df_dict['fulldf']
-
-        elif self.questions_df is None:
-            print "Nothing to train. Exiting."
-            return
-        
-        if train_LDA:
-            corpus = pd.concat([self.questions_df.title+" "+self.questions_df.question,
-                                self.answers_df.answer,
-                                self.comments_df.comment])
-            # strip the HTML - this will throw warnings if there are URLs in the corpus, but oh well
-            corput = [BeautifulSoup(entry).get_text() for entry in corpus]
-            site_corpus = [self.post_to_words(post) for post in corpus]
-            
-            # create the BoW dictionary
-            self.dictionary = gensim.corpora.Dictionary(line for line in site_corpus)
-            print " ...created the dictionary."
-            
-            # create the vectorized corpus
-            self.vectorized_corpus = [self.dictionary.doc2bow(post) for post in site_corpus]
-            print " ...vectorized the corpus."
-
-            # tfidf transformation
-            if tfidf:
-                tfidf_model = gensim.models.TfidfModel(self.vectorized_corpus)
-                self.vectorized_corpus = tfidf_model[self.vectorized_corpus]
-
-            # train the LDA model
-            print " ...training the LDA model on %d topics in %d passes and %d iterations." % (num_topics, passes, iterations)
-            sys.stdout.flush()
-            
-            if not multicore:
-                self.LDAmodel = gensim.models.LdaModel(self.vectorized_corpus, 
-                                                       id2word=self.dictionary, 
-                                                       num_topics = num_topics,
-                                                       iterations = iterations, 
-                                                       passes = passes)
-            else: #this doesn't seem to work... 
-                self.LDAmodel = gensim.models.ldamulticore.LdaMulticore(self.vectorized_corpus, 
-                                                       id2word=self.dictionary, 
-                                                       num_topics = num_topics,
-                                                       iterations = iterations, 
-                                                       passes = passes,
-                                                       workers = multicore)
-            print " ...trained the LDA model."
-            sys.stdout.flush()
-
-            # compute all the LDA and boolean-tag vectors
-
-            # an ndarray of size (n_questions, n_topics) to hold the LDA vectors of the questions
-            self.questionLDA = self.LDAvec2ndarray(self.post2LDAvec(self.questions_df.title + " " + self.questions_df.question))
-
-            # an ndarray of size (n_questions, n_tags) to hold the boolean tag vectors for the questions
-            self.tags = self.post2tagvec(self.questions_df.tags) 
-
-        # compute amateur and expert vectors for each user
-
-        if compute_similarity:
-            self.compute_sim()
-            print " ...computed similarity matrics."
-            sys.stdout.flush()
-
-        #print "Done training!"
-        #sys.stdout.flush()
+        try:
+            self.lf_question = pkl.load(gzip.GzipFile('data/'+self.site_name+'/pfeatures.gzpkl', 'rb'))
+            self.lf_user = pkl.load(gzip.GzipFile('data/'+self.site_name+'/ufeatures.gzpkl', 'rb'))
+            self.lf_uidx = pkl.load(open('data/'+self.site_name+'/uidx.pkl', 'rb'))
+            self.lf_qidx = pkl.load(open('data/'+self.site_name+'/midx.pkl', 'rb'))
+        except:
+            print "Error loading latent factors. Are trained vectors available?"
+            self.lf_user = None
+            self.lf_question = None
+            self.lf_uidx = None
+            self.lf_qidx = None
 
         return
 
-    # (pre)compute the similarity matrices
-    def compute_sim(self):
+
+    # (re)train the recommender
+    def train(self):
         """
-        Compute the title, question and tags similarity matrices.
+        Computes word2vec and tag vectors for each question, as well as the resulting cosine-similarity matrices.
         """
 
-        # check if the model is trained... if not, ask to train
-        if self.LDAmodel == None:
-            print "Model has not been trained yet."
-            train_now = raw_input("Train (with default settings) or Load now? [t/l/N] ")
-            if train_now == 't':
-                self.train()
-            if train_now == 'l':
-                name = raw_input("Model to load: ")
-                if name != None:
-                    try:
-                        self.load(name)
-                    except:
-                        print "No such model. Try training a model first. Exiting gracefully."
-                        return
-            else:
-                return
+        stops = set(stopwords.words("english"))
 
-        # questions and titles
-        self.question_similarity = cosine_similarity(self.questionLDA, self.questionLDA)
+        # an ndarray of size (n_questions, n_topics) to hold the word2vec-vectors of the questions
+        self.questionW2V = np.array(map(lambda x: self.q2v(x, stops),
+                                    (self.questions_df.title + " " + self.questions_df.question).values))
+
+        # an ndarray of size (n_questions, n_tags) to hold the boolean tag vectors for the questions
+        self.tags = self.post2tagvec(self.questions_df.tags) 
+
+        self.question_similarity = cosine_similarity(self.questionW2V, self.questionW2V)
+        # maybe use Jaccard similarity?
         self.tag_similarity = np.dot(self.tags, self.tags.T)
 
         return
@@ -203,50 +96,25 @@ class Recommender(object):
     # save a trained model    
     def save(self, name):
         """
-        Save a trained model to disk. The dictionary, vectorized corpus,
-        and LDA model will be saved (resp.) to 
-        
-        name + "_dict.pkl"
-        name + "_vectCorpus.mm"
-        name + "_LDAmodel.pkl"
+        Save a trained model to disk.
         """
 
         print "Saving the model..."
         
-        if self.LDAmodel == None:
-            print "Model hasn't been trained yet."
-            return
-
         try:
-            self.dictionary.save('data/'+self.site_name+'/'+name+'_dict')
-            print " ...saved the dictionary."
-            sys.stdout.flush()
-
-            gensim.corpora.MmCorpus.serialize('data/'+self.site_name+'/'+name+'_vectCorpus.mm', 
-                                              self.vectorized_corpus)
-            print " ...saved the corpus."
-            sys.stdout.flush()
-
-            self.LDAmodel.save('data/'+self.site_name+'/'+name+'_LDAmodel')
-            print " ...saved the LDA model."
-            sys.stdout.flush()
-
-            pkl.dump(self.questionLDA, gzip.GzipFile('data/'+self.site_name+'/'+name+'_questionLDA', 'wb'))
+            pkl.dump(self.questionW2V, gzip.GzipFile('data/'+self.site_name+'/'+name+'_questionW2V', 'wb'))
             pkl.dump(self.tags, gzip.GzipFile('data/'+self.site_name+'/'+name+'_tagVec', 'wb'))
-            print " ...saved the LDA vectors."
-            sys.stdout.flush()
 
-            if self.question_similarity is not None:
-                pkl.dump(self.question_similarity, gzip.GzipFile('data/'+self.site_name+'/'+name+'_questionSim', 'wb'))
-                pkl.dump(self.tag_similarity, gzip.GzipFile('data/'+self.site_name+'/'+name+'_tagSim', 'wb'))
+            pkl.dump(self.question_similarity, gzip.GzipFile('data/'+self.site_name+'/'+name+'_questionSim', 'wb'))
+            pkl.dump(self.tag_similarity, gzip.GzipFile('data/'+self.site_name+'/'+name+'_tagSim', 'wb'))
 
         except:
             print "Error saving."
+
         return
     
     
     # load a trained model
-    
     def load(self, name):
         """
         Loads a trained model from disk.
@@ -256,34 +124,10 @@ class Recommender(object):
         sys.stdout.flush()
         
         try:
-            self.dictionary = gensim.corpora.Dictionary.load('data/'+self.site_name+'/'+name+'_dict')
-            self.vectorized_corpus = gensim.corpora.MmCorpus('data/'+self.site_name+'/'+name+'_vectCorpus.mm')
-            self.LDAmodel = gensim.models.LdaModel.load('data/'+self.site_name+'/'+name+'_LDAmodel')
-            print " ...LDA model loaded."
-            sys.stdout.flush()
-
-            """
             self.question_similarity = pkl.load(gzip.GzipFile('data/'+self.site_name+'/'+name+'_questionSim', 'rb'))
-            print " ...question similarities loaded."
-            sys.stdout.flush()
-
             self.tag_similarity = pkl.load(gzip.GzipFile('data/'+self.site_name+'/'+name+'_tagSim', 'rb'))
-            print " ...tag similarities loaded."
-            sys.stdout.flush()
-            """
-
-            self.questionLDA = pkl.load(gzip.GzipFile('data/'+self.site_name+'/'+name+'_questionLDA', 'rb'))
-            print " ...question LDA vectors loaded."
-            sys.stdout.flush()
-
+            self.questionW2V = pkl.load(gzip.GzipFile('data/'+self.site_name+'/'+name+'_questionW2V', 'rb'))
             self.tags = pkl.load(gzip.GzipFile('data/'+self.site_name+'/'+name+'_tagVec', 'rb'))
-            print " ...tag vectors loaded."
-            sys.stdout.flush()
-
-            self.lf_question = pkl.load(gzip.GzipFile('data/'+self.site_name+'/pfeatures.gzpkl', 'rb'))
-            self.lf_user = pkl.load(gzip.GzipFile('data/'+self.site_name+'/ufeatures.gzpkl', 'rb'))
-            self.lf_uidx = pkl.load(open('data/'+self.site_name+'/uidx.pkl', 'rb'))
-            self.lf_qidx = pkl.load(open('data/'+self.site_name+'/midx.pkl', 'rb'))
 
             print "Successfully loaded the recommender."
             sys.stdout.flush()
@@ -297,62 +141,30 @@ class Recommender(object):
     # helper function to convert post text (question, answer, comment, title)
     #   to a list of words
 
-    def post_to_words(self, raw_post):
-        """Convert the output of BeautifulSoup.getText() to a list 
-        of loweselfase words. Remove punctuation, urls, and single letters.
+    def q2BoW(self, qtext, stops = None):
+        """
+        Converts qtext to a list of words, excluding stopwords and restricting to words in W2Vmodel.vocab.
         """
 
-        #split on white space and remove urls
-        words = raw_post.split()
-        words = ' '.join([w for w in words if w[:4] != 'http'])
+        if not stops:
+            stops = set(stopwords.words("english"))
 
-        # remove punctuation, convert to lower case 
-        words = re.sub("[^a-zA-Z]"," ", words).lower().split()
+        qtext = BeautifulSoup(qtext).getText()
+        alpha_only = re.sub("[^a-zA-Z]", " ", qtext)
+        words = alpha_only.split()
+        meaningful_words = [w for w in words if ((w not in stops) and (w in self.W2Vmodel.vocab))]
 
-        # remove stopwords and single characters
-        stops = stopwords.words("english")
-        letters = list(string.ascii_lowercase)
-        stops.extend(letters)
-        stops = set(stops)
-
-        words = [w for w in words if w not in stops]
-
-        return words
+        return meaningful_words
     
+    def q2v(self, qtext, stops=None):
+        """
+        Converts a question to the normalized mean word2vec of the meaninfgul words in
+        qtext.
+        """
+        
+        v = [self.W2Vmodel[word] for word in self.q2BoW(qtext, stops)]
+        return gensim.matutils.unitvec(np.array(v).mean(axis=0))
     
-    # some functions to convert posts -> LDAvec -> ndarray
-    def LDAvec2ndarray(self, LDAvec):
-        """
-        Converts the (apparently) sparse LDA-vectors to an ndarray. 
-
-        Inputs
-        ======
-        LDAvec : LDAvec or numpy array of LDA vectors
-        """
-
-        vec = np.array(LDAvec)
-        if isinstance(LDAvec, list): # if it is a list, convert to an ndarray with .shape object
-            output = np.zeros(self.LDAmodel.num_topics)
-            for x in vec:
-                output[int(x[0])] = x[1]
-            return output
-        else:
-            output = np.zeros((vec.shape[0],self.LDAmodel.num_topics))
-            for j in range(vec.shape[0]):
-                for x in vec[j]:
-                    output[j,int(x[0])] = x[1]
-            return output
-
-    def post2LDAvec(self, question):
-        """
-        Converts post (BeautifulSoup.getText() output) to an LDAvec.
-        """
-
-        if isinstance(question, str): # got a single question/title
-            return self.LDAmodel[self.dictionary.doc2bow(self.post_to_words(question))]
-        else: # got a Series
-            return np.array([self.LDAmodel[self.dictionary.doc2bow(self.post_to_words(text))] for text in question])      
-
     def post2tagvec(self, tags):
         """
         Converts the list of tags or the Series of lists of tags to (an ndarray of) boolean tag vectors.
@@ -380,31 +192,14 @@ class Recommender(object):
                     pass
             return bool_vecs
 
-    # cosine similarity between LDA vectors
-    def LDAsim(self, x, y):
-        """
-        Compute the cosine similarity between the given pd.Series of LDA-vectors.
-        Inputs
-        ======
-        x : LDA vector
-        y : LDA vector
-
-        Since LDA vectors are always nonnegative, the returned cosine similarity will be in [0,1]."""
-
-        X = self.LDAvec2ndarray(x)
-        Y = self.LDAvec2ndarray(y)
-
-        return cosine_similarity(X, Y)[0]
-
-
     # aggregated similarity between questions (title+question+tags)
-    def post_sim(self, q1, q2, new1 = False, new2 = False, w = [1,1,1]):
+    def post_sim(self, q1, q2):
         """Use for computing similarities of new posts. Not yet implemented."""
         return
 
     
     # k-NN for the questions based on weighted cosine + boolean tag similarity
-    def k_nearest_questions(self, question_id, qdf, k = 7, w = [1,1,1], similarity = 'LDA'):
+    def k_nearest_questions(self, question_id, qdf, k = 7, similarity = 'W2V'):
         """
         Returns the k nearest neighbors of the question among those questions in questions_df.
 
@@ -413,15 +208,14 @@ class Recommender(object):
         question : an index of self.question_df
         qdf : a subindex of self.questions_df.index
         k : (optional) number of neighbors
-        w : (optional) weights used in the similarity metric (title, question, tags)
         similarity : (str, optional) similarity matrix to use. Currently supported: 
-                                        'LDA' : cosine similarity of LDA vectors
+                                        'W2V' : cosine similarity of LDA vectors
                                         'tag' : (dot product of boolean tag vectors)
         """
 
         if similarity == 'tag':
             sim_matrix = self.tag_similarity
-        elif similarity == 'LDA':
+        elif similarity == 'W2V':
             sim_matrix = self.question_similarity
 
         if len(qdf) == 0: 
@@ -455,7 +249,7 @@ class Recommender(object):
                             when a user has answered a question. Otherwise, returns the actual score.
         method : (str, optional, default = 'LF') model to use. Supported values are:
                  'LF' : use precomputed latent factors
-                 'LF+LDA' : LF model + LDA-similarity-based collaborative filter (CF) for the residues (not yet implemented)
+                 'LF+W2V' : LF model + LDA-similarity-based collaborative filter (CF) for the residues (not yet implemented)
                  'LF+tag' : LF model + tag-similarity based CF for the residues (NYI)
                  'LF+Tfidf' : LF model + tfidf-3gram-similarity based CF for the residues (NYI)
 
@@ -465,7 +259,7 @@ class Recommender(object):
 
         If the user has answered the question, returns the user's answer stars."""
 
-        if method == "CF":
+        if method == "CF": # not possible to use this yet... I should implement it soon though
             user_answered_questions_idx = self.question_idx[self.answers_df[self.answers_df.user_id == user_id].parent_id.unique()]
 
             if len(user_answered_questions_idx) == 0:
@@ -536,12 +330,9 @@ class Recommender(object):
             normed_stars = pd.Series(np.dot(self.lf_user[uidx], self.lf_question[qidx].T),
                                      index = question_id)
 
-            # make a list of the question means indexed by question_id
-            qmeans = self.fulldf.groupby('question_id').item_mean.mean()
-
-            prediction = normed_stars + self.fulldf[self.fulldf.user_id == user_id].user_mean.irow(0) \
-                                      + qmeans.ix[question_id] \
-                                      - self.fulldf.stars.mean()
+            prediction = normed_stars + self.users_df.mean_stars.ix[user_id] \
+                                      + self.questions_df.mean_stars.ix[question_id] \
+                                      - self.answers_df.stars.mean()
 
             return prediction
     
@@ -556,7 +347,7 @@ class Recommender(object):
         k : k-NN parameter
         method : (option, default 'LF') how to predict scores, as follows:
                  'LF' : use precomputed latent factors
-                 'LF+LDA' : LF model + LDA-similarity-based collaborative filter (CF) for the residues (not yet implemented)
+                 'LF+W2V' : LF model + LDA-similarity-based collaborative filter (CF) for the residues (not yet implemented)
                  'LF+tag' : LF model + tag-similarity based CF for the residues (NYI)
                  'LF+Tfidf' : LF model + tfidf-3gram-similarity based CF for the residues (NYI)
 
@@ -589,8 +380,14 @@ class Recommender(object):
 
         return decorated_stars.head(N).index
 
-    # make recommendations for all uses and store the list of recommended question_id's in self.user_df
-    def recommend_all(self, N = 10, method = 'LF', save = True):
+    # make recommendations for all users and store the list of recommended question_id's in self.user_df
+    def recommend_all(self, N = 10, method = 'LF', save = True, pgdb_url = None):
+        """
+        Makes recommendations for all users.
+        save = True : save the user and question dataframes to gzipped pickled files
+        savePSQL = 'PostgreSQL Database URL' : save user and question dataframes to tables (site)_udf, (site)_qdf
+                    in the given postgres database.
+        """
         
         def rq(uid):
             if uid == '-999':
@@ -601,20 +398,45 @@ class Recommender(object):
         self.users_df['recommendations'] = self.users_df.index.map(rq)
 
         if save:
-            dfs = {'questions':self.questions_df,
-                   'answers':self.answers_df,
-                   'tags':self.tags_df,
-                   'users':self.users_df,
-                   'comments':self.comments_df}
-
-            with gzip.GzipFile('data/'+self.site_name+'/dataframes.gzpkl', 'wb') as f:
-                pkl.dump(dfs, f)
-
             with gzip.GzipFile('data/'+self.site_name+'/userdf.gzpkl', 'wb') as f:
                 pkl.dump(self.users_df, f)
 
             with gzip.GzipFile('data/'+self.site_name+'/qdf.gzpkl', 'wb') as f:
                 pkl.dump(self.questions_df, f)
+
+        if pgdb_url is not None:
+            from sqlalchemy import create_engine
+
+            # convert Index arrays and None to lists
+            def safelist(x):
+                if x is None:
+                    return []
+                else:
+                    return list(x)
+            
+            # convert NaN stars to -1
+            def safestars(x):
+                if np.isnan(x):
+                    return -1.
+                else:
+                    return x
+
+            # clean up the user DataFrame for db insertion
+            udf = self.users_df.copy()
+            udf.recommendations = udf.recommendations.apply(safelist)
+            udf.mean_stars = udf.mean_stars.apply(safestars)
+            udf = udf.reset_index()
+
+            # clean up the question DataFram for db insertion
+            qdf = self.questions_df.copy()
+            qdf.mean_stars = qdf.mean_stars.apply(safestars)
+            qdf = qdf.reset_index()
+
+            engine = create_engine(pgdb_url)
+            prefix = self.site_name.split('.')[0]
+
+            udf.to_sql(prefix+'_udf', engine, if_exists='replace')
+            qdf.to_sql(prefix+'_qdf', engine, if_exists='replace')
             
         return   
 
@@ -661,13 +483,12 @@ class Recommender(object):
 
     def similar_questions(self, title, question, N=10):
         """
-        Returns the top N most similar questions (using LDA vectors).
+        Returns the top N most similar questions (using W2V vectors).
         """
         
-        LDAvec = self.post2LDAvec(title+" "+question)
-        qvec = self.LDAvec2ndarray(LDAvec)
+        qvec = self.q2v(title+" "+question)
         
-        similarities = pd.Series(cosine_similarity(qvec,self.questionLDA)[0], index=self.question_idx.index)
+        similarities = pd.Series(cosine_similarity(qvec,self.questionW2V)[0], index=self.question_idx.index)
         similarities.sort(ascending=False)
         
         return similarities.head(N).index

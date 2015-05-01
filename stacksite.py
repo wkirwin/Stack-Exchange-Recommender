@@ -302,6 +302,8 @@ class StackSite(object):
             stars = len(np.where(cutoffs < score)[0]) - 1
             return stars
 
+        self.answers_df['stars'] = self.answers_df.score.apply(star)
+
         # make the full database of (user,question) pairs
         fulldf = pd.DataFrame(data = {'user_id': answers_df.user_id.values,
                                        'question_id': answers_df.parent_id.values,
@@ -313,6 +315,13 @@ class StackSite(object):
 
         umeans = fulldf.groupby('user_id').stars.mean()
         mmeans = fulldf.groupby('question_id').stars.mean()
+
+        # store the user and item means
+        self.users_df['mean_stars'] = None
+        self.users_df['mean_stars'] = umeans
+
+        self.questions_df['mean_stars'] = None
+        self.questions_df['mean_stars'] = mmeans
 
         fulldf['user_mean'] = fulldf.user_id.apply(lambda uidx: umeans.ix[uidx])
         fulldf['item_mean'] = fulldf.question_id.apply(lambda qidx: mmeans.ix[qidx])
