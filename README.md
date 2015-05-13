@@ -6,7 +6,8 @@ Currently, recommendations are made only for users who have answered at least on
 
 The recommender system also uses Google's word2vec to compute similarity of new questions with existing questions. You can either train your own word2vec model (for example, on the site corpus), or pass a pretrained model (for example, from Google) to the recommender.
 
-* (This project is not associated in any way with Stack Exchange. It was built as a project for the [Data Incbuator](https://www.thedataincubator.com/).)
+*(This project is not associated in any way with Stack Exchange. It was built as a project for the [Data Incbuator](https://www.thedataincubator.com/).)
+
 ## Dependences
 
 The system is built in Python 2.7 with the usual scientific stack (numpy, pandas, scikit-learn), and has the following less standard dependencies:
