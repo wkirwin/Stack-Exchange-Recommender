@@ -1,11 +1,12 @@
 # Stack-Exchange-Recommender
 
-A Recommender System for the Stack Exchange family of websites. The system is built on the periodic data dump of the Stack Exchange family of websites available at the [Internet Archive ](https://archive.org/details/stackexchange). 
+A Recommender System for the Stack Exchange family of websites*. The system is built on the periodic data dump of the Stack Exchange family of websites available at the [Internet Archive ](https://archive.org/details/stackexchange). 
 
 Currently, recommendations are made only for users who have answered at least one question. The recommendations are based on a bias-corrected latent factor model (a so-called SVD model in the terminoligy of the Netflix papers). 
 
 The recommender system also trains an LDA (latent Dirichlet allocation) topic model for comparing new questions/answers to old questions/answers, although this feature is not yet implemented. There is also lots of zombie code which will model the residuals of the latent factor model with a collaborative filter based on various types of similarity (cosine similarity of LDA vectors, Tf-idf n-grams, Jaccard similarity of boolean tag vectors, etc...).
 
+* (This project is not associated in any way with Stack Exchange. It was built as a project for the [Data Incbuator](https://www.thedataincubator.com/).)
 ## Dependences
 
 The system is built in Python 2.7 with the usual scientific stack (numpy, pandas, scikit-learn), and has the following less standard dependencies:
